@@ -1,6 +1,7 @@
-# bunjang-cli
 
-번개장터를 **CLI에서 조작**할 수 있도록 만든 실험적 커맨드라인 클라이언트입니다.
+<img width="2752" height="1536" alt="Gemini_Generated_Image_773myd773myd773m" src="https://github.com/user-attachments/assets/433ac5ac-33f2-4086-b7bc-aa435abfabe4" />
+
+ # 번개장터를 **CLI에서 조작**할 수 있도록 만든 실험적 커맨드라인 클라이언트입니다.
 
 검색, 상품 상세 조회, 찜, 채팅, 가격 정렬, 다페이지 수집, 본문 포함 대량 추출까지 지원하며, 이후 AI 에이전트가 이 결과를 읽고 선별/평가/랭킹하는 용도로 사용할 수 있습니다.
 
@@ -23,12 +24,11 @@
 
 ---
 
+
 ## 설치
 
 ### 요구 사항
 - Node.js 22+
-
-이 README는 **`bunjang-cli`가 npm에 배포되어 있다**는 가정으로 작성되어 있습니다.
 
 기본 실행 형식은 아래와 같습니다.
 ```bash
