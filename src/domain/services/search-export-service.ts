@@ -3,6 +3,7 @@ import { ItemService } from './item-service.js';
 import { SearchService } from './search-service.js';
 
 export interface SearchExportItem {
+  sourcePage?: number | null;
   summary: ListingSummary;
   detail?: ListingDetail;
   error?: string;
@@ -52,12 +53,14 @@ export class SearchExportService {
         try {
           const detailResult = await this.itemService.get(summary.id);
           result.itemTransport = detailResult.transportUsed;
-          result.items[current] = {
-            summary,
-            detail: detailResult.item,
-          };
+      result.items[current] = {
+        sourcePage: typeof summary.raw?.page === 'number' ? summary.raw.page : null,
+        summary,
+        detail: detailResult.item,
+      };
         } catch (error) {
           result.items[current] = {
+            sourcePage: typeof summary.raw?.page === 'number' ? summary.raw.page : null,
             summary,
             error: error instanceof Error ? error.message : String(error),
           };

@@ -41,5 +41,28 @@ describe('AgentSearchRankService', () => {
     const result = await service.collect('갤럭시 s25 울트라', { maxItems: 2 }, { withDetail: true, concurrency: 2 });
     expect(result.items).toHaveLength(2);
     expect(result.items[0]?.detail?.description).toBe('본문 1');
+    expect(result.items[0]?.sourcePage).toBeNull();
+  });
+
+  it('preserves sourcePage provenance when the search summary carries page metadata', async () => {
+    const listings = [
+      {
+        id: '1',
+        title: '갤럭시 S25 울트라',
+        url: 'https://m.bunjang.co.kr/products/1',
+        price: 1000000,
+        currency: 'KRW' as const,
+        raw: { page: 2 },
+      },
+    ];
+    const details = {
+      '1': { ...listings[0], description: '본문 1', metadata: {} },
+    };
+    const browser = new FakeTransport('browser', ['search', 'item'], { search: listings, items: details });
+    const api = new FakeTransport('api', []);
+    const router = new CapabilityRouter(browser, api, { preferredTransport: 'browser' });
+    const service = new SearchExportService(new SearchService(router), new ItemService(router));
+    const result = await service.collect('갤럭시 s25 울트라', { maxItems: 1 }, { withDetail: true, concurrency: 1 });
+    expect(result.items[0]?.sourcePage).toBe(2);
   });
 });
