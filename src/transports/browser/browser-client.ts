@@ -1,0 +1,609 @@
+import { chromium, type Page } from 'playwright';
+import { SessionStore } from '../../config/session-store.js';
+import {
+  type ChatThread,
+  type ChatThreadDetail,
+  type ListingDetail,
+  type ListingSummary,
+  type PurchaseState,
+  type SearchFilters,
+  type SessionStatus,
+} from '../../domain/models.js';
+import type { BunjangTransport, Capability } from '../../domain/transport.js';
+import { prompt } from '../../utils/cli-io.js';
+import { parsePrice } from '../../utils/text.js';
+import { listingActionUrl, listingUrl, searchPageUrl } from '../../utils/url.js';
+import { detectAuthenticatedSession } from './session-detection.js';
+
+interface BrowserClientOptions {
+  debug?: boolean;
+}
+
+class AuthRequiredError extends Error {
+  constructor(message = 'Authenticated Bunjang session required.') {
+    super(message);
+    this.name = 'AuthRequiredError';
+  }
+}
+
+const SEARCH_CARD_EVAL = () => {
+  const anchors = Array.from(document.querySelectorAll('a[href*="/products/"]')) as HTMLAnchorElement[];
+  const seen = new Set<string>();
+  return anchors.flatMap((anchor) => {
+    const href = anchor.href;
+    const match = href.match(/\/products\/(\d+)/);
+    const id = match?.[1];
+    if (!id || seen.has(id)) return [];
+    seen.add(id);
+    const title =
+      anchor.querySelector('div[class*="jpGcWM"], div[class*="title"], p')?.textContent?.trim() ||
+      anchor.querySelector('img')?.getAttribute('alt') ||
+      anchor.textContent?.trim() ||
+      `Listing ${id}`;
+    const imageUrl = anchor.querySelector('img')?.getAttribute('src') ?? null;
+    const priceText =
+      Array.from(anchor.querySelectorAll('div, span'))
+        .map((node) => node.textContent?.trim() ?? '')
+        .find((text) => /^[0-9][0-9,]{2,}$/.test(text)) ??
+      anchor.querySelector('div[class*="gZIZmf"]')?.textContent?.trim() ??
+      null;
+    const metaText = Array.from(anchor.querySelectorAll('div, span'))
+      .map((node) => node.textContent?.trim() ?? '')
+      .find((text) => text.includes('전') || text.includes('서울') || text.includes('부산') || text.includes('경기') || text.includes('인천') || text.includes('지역정보 없음')) ?? null;
+    const cardText = anchor.closest('article, li, div')?.textContent ?? anchor.textContent ?? '';
+    return [{ id, href, title, imageUrl, priceText, metaText, cardText }];
+  });
+};
+
+const DETAIL_EVAL = () => {
+  const text = document.body.innerText;
+  const meta = Object.fromEntries(
+    Array.from(document.querySelectorAll('meta[property], meta[name]')).flatMap((node) => {
+      const key = node.getAttribute('property') || node.getAttribute('name');
+      const value = node.getAttribute('content');
+      return key && value ? [[key, value]] : [];
+    }),
+  );
+  const title =
+    meta['og:title'] ||
+    document.querySelector('h1')?.textContent?.trim() ||
+    document.title ||
+    'Unknown item';
+  const description =
+    meta['og:description'] ||
+    document.querySelector('meta[name="description"]')?.getAttribute('content') ||
+    null;
+  const summaryWrapper = document.querySelector('[class*="Summary_wrapper"]');
+  const priceCandidatesFromSummary = Array.from(
+    summaryWrapper?.querySelectorAll('p, span') ?? [],
+  )
+    .map((node) => node.textContent?.trim() ?? '')
+    .filter((value) => value.includes('원'));
+  const priceCandidates = text.match(/[0-9][0-9,]{2,}\s*원/g) ?? [];
+  const imageUrl = (document.querySelector('meta[property="og:image"]') as HTMLMetaElement | null)?.content ?? null;
+  return { title, description, priceCandidates, priceCandidatesFromSummary, imageUrl, meta, text };
+};
+
+export class BrowserClient implements BunjangTransport {
+  readonly name = 'browser' as const;
+  private readonly store: SessionStore;
+  private readonly debug: boolean;
+
+  constructor(store = new SessionStore(), options: BrowserClientOptions = {}) {
+    this.store = store;
+    this.debug = options.debug ?? false;
+  }
+
+  async supports(_capability: Capability): Promise<boolean> {
+    return true;
+  }
+
+  async loginInteractive(): Promise<SessionStatus> {
+    this.store.ensure();
+    const context = await chromium.launchPersistentContext(this.store.userDataDir, {
+      headless: false,
+      viewport: { width: 430, height: 932 },
+      locale: 'ko-KR',
+    });
+    const page = context.pages()[0] ?? (await context.newPage());
+    await page.goto('https://m.bunjang.co.kr/login', { waitUntil: 'domcontentloaded' });
+    console.error('A headful Bunjang browser has been opened. Please complete login manually.');
+    await prompt('Press Enter here after login is complete... ', true);
+    await this.softSettle(page);
+    const verification = await this.detectSession(page);
+    if (!verification.authenticated) {
+      await context.close();
+      throw new Error(`Login could not be verified (${verification.detectedBy}). Please complete login and retry.`);
+    }
+    this.store.saveMetadata({ lastLoginAt: new Date().toISOString(), lastTransport: 'browser' });
+    await context.close();
+    return this.getSessionStatus();
+  }
+
+  async getSessionStatus(): Promise<SessionStatus> {
+    const metadata = this.store.readMetadata();
+    if (!this.store.profileExists() || metadata.lastLoginAt === null) {
+      return {
+        authenticated: false,
+        profileExists: this.store.profileExists(),
+        userDataDir: this.store.userDataDir,
+        metadataPath: this.store.metadataPath,
+        headfulLoginRequired: true,
+        lastLoginAt: metadata.lastLoginAt,
+        detectedBy: 'missing-session-metadata',
+      };
+    }
+    const context = await chromium.launchPersistentContext(this.store.userDataDir, {
+      headless: true,
+      viewport: { width: 430, height: 932 },
+      locale: 'ko-KR',
+    });
+    const page = context.pages()[0] ?? (await context.newPage());
+    await page.goto('https://m.bunjang.co.kr/', { waitUntil: 'domcontentloaded' });
+    await this.softSettle(page);
+    const verification = await this.detectSession(page);
+    await context.close();
+    return {
+      authenticated: verification.authenticated,
+      profileExists: this.store.profileExists(),
+      userDataDir: this.store.userDataDir,
+      metadataPath: this.store.metadataPath,
+      headfulLoginRequired: !verification.authenticated,
+      lastLoginAt: metadata.lastLoginAt,
+      detectedBy: verification.detectedBy,
+    };
+  }
+
+  async search(query: string, filters: SearchFilters): Promise<ListingSummary[]> {
+    return this.withPage(false, async (page) => {
+      const startPage = filters.startPage ?? 1;
+      const totalPages = filters.pages ?? 1;
+      const order = filters.sort ?? 'score';
+      const deduped = new Map<string, ListingSummary>();
+      for (let pageNumber = startPage; pageNumber < startPage + totalPages; pageNumber += 1) {
+        await page.goto(searchPageUrl(query, pageNumber, order), { waitUntil: 'domcontentloaded' });
+        await this.softSettle(page);
+        const rawCards = await page.evaluate(SEARCH_CARD_EVAL);
+        for (const card of rawCards) {
+          const price = parsePrice(card.priceText ?? card.cardText);
+          const item: ListingSummary = {
+            id: card.id,
+            title: card.title.trim(),
+            url: card.href.startsWith('http') ? card.href : `https://m.bunjang.co.kr${card.href}`,
+            price,
+            currency: 'KRW',
+            imageUrl: card.imageUrl,
+            location: card.metaText,
+            transportUsed: 'browser',
+            raw: { text: card.cardText, priceText: card.priceText, metaText: card.metaText, page: pageNumber },
+          };
+          if (this.matchesFilters(item.price, filters) && !deduped.has(item.id)) {
+            deduped.set(item.id, item);
+          }
+          if (deduped.size >= (filters.maxItems ?? 20)) {
+            break;
+          }
+        }
+        if (deduped.size >= (filters.maxItems ?? 20) || rawCards.length === 0) {
+          break;
+        }
+      }
+      return Array.from(deduped.values()).slice(0, filters.maxItems ?? 20);
+    });
+  }
+
+  async getItem(id: string): Promise<ListingDetail> {
+    return this.withPage(false, async (page) => {
+      await page.goto(listingUrl(id), { waitUntil: 'domcontentloaded' });
+      await this.softSettle(page);
+      const data = await page.evaluate(DETAIL_EVAL);
+      const preferredPriceCandidate =
+        data.priceCandidatesFromSummary.find((value) => value.includes('%') && value.includes('원')) ??
+        data.priceCandidatesFromSummary[data.priceCandidatesFromSummary.length - 1] ??
+        data.priceCandidates[0];
+      return {
+        id,
+        title: data.title,
+        url: page.url(),
+        price: parsePrice(preferredPriceCandidate),
+        currency: 'KRW',
+        imageUrl: data.imageUrl,
+        description: data.description,
+        transportUsed: 'browser',
+        metadata: Object.fromEntries(
+          Object.entries(data.meta).map(([key, value]) => [key, String(value)]),
+        ),
+        raw: { text: data.text.slice(0, 5000) },
+      };
+    });
+  }
+
+  async getItems(ids: string[]): Promise<ListingDetail[]> {
+    const results: ListingDetail[] = [];
+    for (const id of ids) {
+      results.push(await this.getItem(id));
+    }
+    return results;
+  }
+
+  async listChats(): Promise<ChatThread[]> {
+    return this.withPage(true, async (page) => {
+      await this.openTalkInbox(page);
+      return this.extractChatThreads(page);
+    });
+  }
+
+  async startChat(listingId: string, message: string): Promise<ChatThreadDetail> {
+    return this.withPage(true, async (page) => {
+      await this.gotoAuthenticated(page, listingActionUrl(listingId));
+      const contactButton = await this.findContactButton(page);
+      await contactButton.click({ force: true, timeout: 10000 });
+      await page.waitForTimeout(2500);
+      const frame = await this.getTalkFrame(page);
+      await this.dismissTalkNotices(frame);
+      const thread = await this.extractActiveThread(frame);
+      await this.sendMessageInFrame(frame, message);
+      return this.extractActiveThread(frame, message, thread);
+    });
+  }
+
+  async readChat(threadId: string): Promise<ChatThreadDetail> {
+    return this.withPage(true, async (page) => {
+      const frame = await this.openTalkInbox(page);
+      await this.selectThreadInFrame(frame, threadId);
+      return this.extractActiveThread(frame);
+    });
+  }
+
+  async sendChat(threadId: string, message: string): Promise<ChatThreadDetail> {
+    return this.withPage(true, async (page) => {
+      const frame = await this.openTalkInbox(page);
+      await this.selectThreadInFrame(frame, threadId);
+      await this.sendMessageInFrame(frame, message);
+      return this.extractActiveThread(frame, message);
+    });
+  }
+
+  async listFavorites(): Promise<ListingSummary[]> {
+    return this.withPage(true, async (page) => {
+      await this.navigateViaNavText(page, ['찜', '관심']);
+      await this.softSettle(page);
+      const items = await page.evaluate(SEARCH_CARD_EVAL);
+      return items.map((card) => ({
+        id: card.id,
+        title: card.title.trim(),
+        url: card.href,
+        price: parsePrice(card.cardText),
+        currency: 'KRW',
+        imageUrl: card.imageUrl,
+        transportUsed: 'browser',
+        raw: { text: card.cardText },
+      }));
+    });
+  }
+
+  async addFavorite(listingId: string): Promise<ListingDetail> {
+    return this.toggleFavorite(listingId, ['찜', '관심'], true);
+  }
+
+  async removeFavorite(listingId: string): Promise<ListingDetail> {
+    return this.toggleFavorite(listingId, ['찜해제', '찜 취소', '관심 해제', '관심취소', '찜', '관심'], false);
+  }
+
+  async preparePurchase(listingId: string): Promise<PurchaseState> {
+    return this.withPage(true, async (page) => {
+      await page.goto(listingUrl(listingId), { waitUntil: 'domcontentloaded' });
+      await this.softSettle(page);
+      const available = await page.getByRole('button', { name: /구매|안전결제|결제/i }).first().isVisible().catch(() => false);
+      return {
+        listingId,
+        available,
+        stage: available ? 'item-page' : 'unavailable',
+        nextAction: available ? 'Run purchase start to open the purchase flow.' : 'No purchase button detected.',
+        requiresUserConfirmation: true,
+        transportUsed: 'browser',
+      };
+    });
+  }
+
+  async startPurchase(listingId: string): Promise<PurchaseState> {
+    return this.withPage(true, async (page) => {
+      await page.goto(listingUrl(listingId), { waitUntil: 'domcontentloaded' });
+      await this.softSettle(page);
+      const button = page.getByRole('button', { name: /구매|안전결제|결제/i }).first();
+      const available = await button.isVisible().catch(() => false);
+      if (!available) {
+        return {
+          listingId,
+          available: false,
+          stage: 'unavailable',
+          nextAction: 'No purchase button detected on the item page.',
+          requiresUserConfirmation: true,
+          transportUsed: 'browser',
+        };
+      }
+      await button.click();
+      await this.softSettle(page);
+      return {
+        listingId,
+        available: true,
+        stage: 'ready-for-manual-confirmation',
+        nextAction: 'Purchase flow opened. Review the page manually; v1 intentionally stops before automatic confirmation.',
+        requiresUserConfirmation: true,
+        transportUsed: 'browser',
+        raw: { url: page.url() },
+      };
+    });
+  }
+
+  private async toggleFavorite(listingId: string, labels: string[], shouldBeFavorited: boolean): Promise<ListingDetail> {
+    return this.withPage(true, async (page) => {
+      await this.gotoAuthenticated(page, listingActionUrl(listingId));
+      const locator = await this.findFavoriteButton(page, labels);
+      const favoriteTextBefore = await locator.textContent().catch(() => null);
+      await locator.click();
+      await this.softSettle(page);
+      let favoriteTextAfter = await locator.textContent().catch(() => null);
+      const beforeCount = this.parseFavoriteCount(favoriteTextBefore);
+      const afterCount = this.parseFavoriteCount(favoriteTextAfter);
+      const needsSecondToggle =
+        beforeCount !== null &&
+        afterCount !== null &&
+        ((shouldBeFavorited && afterCount < beforeCount) || (!shouldBeFavorited && afterCount > beforeCount));
+      if (needsSecondToggle) {
+        await locator.click();
+        await this.softSettle(page);
+        favoriteTextAfter = await locator.textContent().catch(() => null);
+      }
+      const detail = await this.getItem(listingId);
+      return {
+        ...detail,
+        raw: {
+          ...(detail.raw ?? {}),
+          favoriteTextBefore,
+          favoriteTextAfter,
+        },
+      };
+    });
+  }
+
+  private matchesFilters(price: number | null, filters: SearchFilters): boolean {
+    if (filters.priceMin !== undefined && (price === null || price < filters.priceMin)) return false;
+    if (filters.priceMax !== undefined && (price === null || price > filters.priceMax)) return false;
+    return true;
+  }
+
+  private async withPage<T>(requireSession: boolean, run: (page: Page) => Promise<T>): Promise<T> {
+    return this.withPageAttempt(requireSession, run, 0);
+  }
+
+  private async softSettle(page: Page): Promise<void> {
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(1500);
+    await page.mouse.wheel(0, 1600);
+    await page.waitForTimeout(400);
+  }
+
+  private async navigateViaNavText(page: Page, labels: string[]): Promise<string> {
+    await this.gotoAuthenticated(page, 'https://m.bunjang.co.kr/');
+    for (const label of labels) {
+      const exact = page.getByRole('link', { name: new RegExp(label) }).first();
+      if (await exact.isVisible().catch(() => false)) {
+        await exact.click();
+        await this.softSettle(page);
+        return page.url();
+      }
+      const button = page.getByRole('button', { name: new RegExp(label) }).first();
+      if (await button.isVisible().catch(() => false)) {
+        await button.click();
+        await this.softSettle(page);
+        return page.url();
+      }
+    }
+    throw new Error(`Unable to find navigation entry for labels: ${labels.join(', ')}`);
+  }
+
+  private async openTalkInbox(page: Page) {
+    await this.navigateViaNavText(page, ['채팅', '번개톡']);
+    await page.waitForTimeout(2500);
+    const frame = await this.getTalkFrame(page);
+    await this.dismissTalkNotices(frame);
+    return frame;
+  }
+
+  private async withPageAttempt<T>(requireSession: boolean, run: (page: Page) => Promise<T>, attempt: number): Promise<T> {
+    if (requireSession && attempt === 0) {
+      const status = await this.getSessionStatus();
+      if (!status.authenticated) {
+        await this.loginInteractive();
+        return this.withPageAttempt(requireSession, run, attempt + 1);
+      }
+    }
+    this.store.ensure();
+    const context = await chromium.launchPersistentContext(this.store.userDataDir, {
+      headless: true,
+      viewport: { width: 430, height: 932 },
+      locale: 'ko-KR',
+    });
+    try {
+      const page = context.pages()[0] ?? (await context.newPage());
+      if (this.debug) {
+        page.on('console', (msg) => console.error('[browser]', msg.text()));
+      }
+      if (requireSession) {
+        await page.goto('https://m.bunjang.co.kr/', { waitUntil: 'domcontentloaded' });
+        await this.softSettle(page);
+        const verification = await this.detectSession(page);
+        if (!verification.authenticated) {
+          throw new AuthRequiredError(`Session is not authenticated (${verification.detectedBy}).`);
+        }
+      }
+      return await run(page);
+    } catch (error) {
+      if (error instanceof AuthRequiredError && attempt < 1) {
+        await context.close();
+        await this.loginInteractive();
+        return this.withPageAttempt(requireSession, run, attempt + 1);
+      }
+      throw error;
+    } finally {
+      await context.close();
+    }
+  }
+
+  private async gotoAuthenticated(page: Page, url: string): Promise<void> {
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await this.softSettle(page);
+    const verification = await this.detectSession(page);
+    if (!verification.authenticated) {
+      throw new AuthRequiredError(`Authentication required after navigating to ${url} (${verification.detectedBy}).`);
+    }
+  }
+
+  private async detectSession(page: Page) {
+    const [bodyText, cookies] = await Promise.all([
+      page.locator('body').innerText().catch(() => ''),
+      page.context().cookies(),
+    ]);
+    return detectAuthenticatedSession({
+      url: page.url(),
+      bodyText,
+      cookieNames: cookies.map((cookie) => cookie.name),
+    });
+  }
+
+  private async getTalkFrame(page: Page) {
+    await page.waitForTimeout(1000);
+    const frame = page.frames().find((candidate) => candidate.url().startsWith('https://talk.bunjang.co.kr/'));
+    if (!frame) {
+      throw new Error('Unable to locate talk frame.');
+    }
+    return frame;
+  }
+
+  private async dismissTalkNotices(frame: Page | import('playwright').Frame) {
+    const confirm = frame.getByRole('button', { name: '확인했어요' }).first();
+    if (await confirm.isVisible().catch(() => false)) {
+      await confirm.click({ force: true });
+      await frame.waitForTimeout(300);
+    }
+  }
+
+  private async extractChatThreads(page: Page): Promise<ChatThread[]> {
+    const frame = await this.getTalkFrame(page);
+    const cards = frame.locator('div[class*="e93e7277-0"]');
+    const count = Math.min(await cards.count(), 20);
+    const threads: ChatThread[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const card = cards.nth(i);
+      const text = (await card.innerText().catch(() => '')).trim();
+      if (!text || text.includes('전체 대화')) continue;
+      await card.click({ force: true });
+      await frame.waitForTimeout(200);
+      const id = this.extractThreadId(frame.url()) ?? `thread-${i + 1}`;
+      const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+      threads.push({
+        id,
+        title: lines[0] ?? `Chat ${i + 1}`,
+        lastMessage: lines[1] ?? null,
+        participants: lines[0] ? [lines[0]] : [],
+        url: frame.url(),
+        transportUsed: 'browser',
+      });
+    }
+    return threads;
+  }
+
+  private extractThreadId(url: string): string | null {
+    const match = url.match(/\/user\/([^?]+)/);
+    return match?.[1] ?? null;
+  }
+
+  private async selectThreadInFrame(frame: import('playwright').Frame, threadId: string) {
+    const cards = frame.locator('div[class*="e93e7277-0"]');
+    const count = await cards.count();
+    for (let i = 0; i < count; i += 1) {
+      const card = cards.nth(i);
+      const text = (await card.innerText().catch(() => '')).trim();
+      if (!text || text.includes('전체 대화')) continue;
+      await card.click({ force: true });
+      await frame.waitForTimeout(200);
+      const currentId = this.extractThreadId(frame.url());
+      if (currentId === threadId || text.includes(threadId)) {
+        return;
+      }
+    }
+    throw new Error(`Unable to locate thread ${threadId} in talk inbox.`);
+  }
+
+  private async extractActiveThread(
+    frame: import('playwright').Frame,
+    sentMessage?: string,
+    fallback?: Partial<ChatThreadDetail>,
+  ): Promise<ChatThreadDetail> {
+    const data = await frame.evaluate(() => {
+      const body = document.body.innerText;
+      const lines = body.split('\n').map((line) => line.trim()).filter(Boolean);
+      const title = document.querySelector('strong')?.textContent?.trim() ?? lines.find((line) => /전 접속|구매하기/.test(line)) ?? 'Talk thread';
+      const messages = lines.slice(-30).map((body, index) => ({ id: String(index + 1), body }));
+      return { body, title, messages };
+    });
+    const title = typeof fallback?.title === 'string' && fallback.title ? fallback.title : data.title;
+    const id = this.extractThreadId(frame.url()) ?? fallback?.id ?? 'unknown';
+    const messages = sentMessage && !data.messages.some((message) => message.body.includes(sentMessage))
+      ? [...data.messages, { id: String(data.messages.length + 1), body: sentMessage }]
+      : data.messages;
+    return {
+      id,
+      title,
+      participants: title ? [title] : [],
+      url: frame.url(),
+      transportUsed: 'browser',
+      messages,
+    };
+  }
+
+  private async sendMessageInFrame(frame: import('playwright').Frame, message: string) {
+    await this.dismissTalkNotices(frame);
+    const input = frame.locator('textarea[placeholder="메시지를 입력하세요."]').first();
+    await input.click({ timeout: 10000 });
+    await input.fill(message);
+    await frame.waitForTimeout(200);
+    await input.press('Enter');
+    await frame.waitForTimeout(1200);
+  }
+
+  private async findContactButton(page: Page) {
+    const locators = [
+      page.locator('button[class*="ProductSummarystyle__ContactButton"]').first(),
+      page.locator('button[class*="ContactButton"]').filter({ hasText: /^번개톡$/ }).first(),
+      page.locator('button').filter({ hasText: /^번개톡$/ }).nth(1),
+      page.locator('button').filter({ hasText: /^번개톡$/ }).first(),
+    ];
+    for (const locator of locators) {
+      if (await locator.isVisible().catch(() => false)) {
+        return locator;
+      }
+    }
+    throw new Error('Unable to find product contact button.');
+  }
+
+  private async findFavoriteButton(page: Page, labels: string[]) {
+    const locators = [
+      page.locator('button[class*="FavoriteButton"]').first(),
+      page.locator('button').filter({ hasText: new RegExp(labels.join('|')) }).first(),
+    ];
+    for (const locator of locators) {
+      if (await locator.isVisible().catch(() => false)) {
+        return locator;
+      }
+    }
+    throw new Error('Unable to find favorite button.');
+  }
+
+  private parseFavoriteCount(text: string | null): number | null {
+    if (!text) return null;
+    const digits = text.replace(/[^0-9]/g, '');
+    return digits ? Number(digits) : null;
+  }
+}

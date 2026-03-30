@@ -1,0 +1,29 @@
+{
+  "name": "bunjang-cli",
+  "version": "0.1.0",
+  "description": "CLI-first Bunjang client for humans and AI agents",
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "bin": {
+    "bunjang-cli": "dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "pnpm build && vitest run --config tests/e2e/vitest.config.ts"
+  },
+  "dependencies": {
+    "commander": "^14.0.1",
+    "playwright": "^1.55.1",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
