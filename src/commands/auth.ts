@@ -25,4 +25,14 @@ export function registerAuth(program: Command): void {
       if (this.parent?.parent?.opts().json) printJson(result);
       else printSessionStatus(result.status);
     });
+
+  auth
+    .command('logout')
+    .description('Clear the local CLI session/profile so the next auth flow starts logged out')
+    .action(async function () {
+      const ctx = createAppContext(this.parent?.parent?.opts());
+      const result = await ctx.sessionService.logout();
+      if (this.parent?.parent?.opts().json) printJson(result);
+      else printSessionStatus(result.status);
+    });
 }

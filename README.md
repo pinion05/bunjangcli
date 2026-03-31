@@ -45,6 +45,9 @@ npx bunjang-cli --help
 npx bunjang-cli auth login
 ```
 
+`auth login`은 **TTY가 붙은 interactive 터미널**에서 실행해야 하며, 브라우저에서 로그인한 뒤 **터미널로 돌아와 Enter를 눌러야** 완료됩니다.  
+비-TTY 환경에서는 브라우저만 열리고 로그인 완료 처리가 멈출 수 있습니다.
+
 JSON 출력:
 ```bash
 npx bunjang-cli --json auth login
@@ -54,6 +57,12 @@ npx bunjang-cli --json auth login
 ```bash
 npx bunjang-cli auth status
 npx bunjang-cli --json auth status
+```
+
+로컬 CLI 세션/브라우저 프로필 초기화(로그아웃):
+```bash
+npx bunjang-cli auth logout
+npx bunjang-cli --json auth logout
 ```
 
 세션은 기본적으로 아래 경로에 저장됩니다.

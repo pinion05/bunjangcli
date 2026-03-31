@@ -29,7 +29,7 @@ export function createAppContext(options: AppContextOptions = {}) {
   return {
     store,
     router,
-    sessionService: new SessionService(router),
+    sessionService: new SessionService(router, store),
     searchService,
     itemService,
     chatService: new ChatService(router),

@@ -19,6 +19,7 @@ description: 번개장터를 CLI로 검색, 상세조회, 찜, 채팅, 대량수
 
 ## 실행 원칙
 - README 예시와 동일하게 **항상 `npx bunjang-cli ...` 형식**으로 실행한다.
+- `auth login`은 headful 브라우저를 띄운 뒤 **현재 터미널이 TTY 상태여야 하고, 로그인 완료 후 터미널에서 Enter를 눌러야** 끝난다. 비-TTY 실행에서는 로그인 브라우저만 뜨고 완료 처리가 멈출 수 있으므로 interactive/TTY 세션으로 실행한다.
 - 검색 노이즈(광고, 타모델, 액세서리)가 섞일 수 있음을 전제하고, 필요하면 후처리로 정제한다.
 - 대량 수집 시에는 `--start-page`, `--pages`, `--max-items`, `--with-detail`, `--output`을 우선 활용한다.
 - 실거래 액션(찜, 채팅, 구매 관련)은 로그인 세션이 살아 있는지 먼저 확인한다.
@@ -41,8 +42,12 @@ description: 번개장터를 CLI로 검색, 상세조회, 찜, 채팅, 대량수
 ### 로그인
 ```bash
 npx bunjang-cli auth login
+npx bunjang-cli auth logout
 npx bunjang-cli --json auth status
 ```
+
+- `auth login`은 브라우저에서 로그인 후 **터미널로 돌아와 Enter를 눌러야** 성공 처리된다.
+- 따라서 자동화 도중 로그인할 때는 **TTY가 붙은 interactive 세션**(예: agentty, 직접 터미널 실행)로 돌려야 한다.
 
 ### 검색
 ```bash
