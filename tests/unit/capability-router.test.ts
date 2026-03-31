@@ -40,7 +40,7 @@ describe('CapabilityRouter', () => {
     api.getItem = async () => {
       throw new Error('api unavailable');
     };
-    const router = new CapabilityRouter(browser, api);
+    const router = new CapabilityRouter(browser, api, { preferredTransport: 'api' });
     const result = await router.getItem('1');
     expect(result.transportUsed).toBe('browser');
     expect(result.fallbackReason).toContain('api unavailable');

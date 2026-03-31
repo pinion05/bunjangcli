@@ -15,13 +15,14 @@ description: 번개장터를 CLI로 검색, 상세조회, 찜, 채팅, 대량수
 - 채팅 목록 조회
 - 판매자와 새 채팅 시작
 - 기존 채팅방 메시지 전송
-- 대량 결과를 JSON 파일로 저장
+- 대량 결과를 JSON 파일 또는 AI용 TOON chunk로 저장
 
 ## 실행 원칙
 - README 예시와 동일하게 **항상 `npx bunjang-cli ...` 형식**으로 실행한다.
 - `auth login`은 headful 브라우저를 띄운 뒤 **현재 터미널이 TTY 상태여야 하고, 로그인 완료 후 터미널에서 Enter를 눌러야** 끝난다. 비-TTY 실행에서는 로그인 브라우저만 뜨고 완료 처리가 멈출 수 있으므로 interactive/TTY 세션으로 실행한다.
 - 검색 노이즈(광고, 타모델, 액세서리)가 섞일 수 있음을 전제하고, 필요하면 후처리로 정제한다.
 - 대량 수집 시에는 `--start-page`, `--pages`, `--max-items`, `--with-detail`, `--output`을 우선 활용한다.
+- AI 분석용으로 나눠 저장해야 하면 `--ai --output <directory>`를 사용해 `items-<n>.toon` chunk를 만든다.
 - 실거래 액션(찜, 채팅, 구매 관련)은 로그인 세션이 살아 있는지 먼저 확인한다.
 - 다페이지 export를 검증할 때는 각 item의 **`sourcePage`** 또는 **`summary.raw.page`** 값으로 페이지 기원을 확인한다.
 
@@ -66,6 +67,23 @@ npx bunjang-cli search "갤럭시 s25 울트라" \
   --concurrency 8 \
   --output artifacts/galaxy-s25-ultra-300-with-detail.json
 ```
+
+### AI 분석용 TOON chunk 저장
+```bash
+npx bunjang-cli search "갤럭시 s25 울트라" \
+  --start-page 1 \
+  --pages 30 \
+  --max-items 300 \
+  --with-detail \
+  --ai \
+  --output artifacts/galaxy-s25-ultra-ai
+```
+
+- `--ai`는 `items-1.toon` ... `items-n.toon` chunk 파일을 만든다.
+- `--ai`에서는 `--output`이 **파일이 아니라 디렉토리**여야 한다.
+- manifest 파일은 만들지 않는다.
+- 기본 chunk 목표는 50,000 tokens 이다.
+- TOON 직렬화는 `@toon-format/toon`, 토큰 수 계산은 `gpt-tokenizer`의 `gpt-5` tokenizer 기준이다.
 
 ### 상품 상세
 ```bash

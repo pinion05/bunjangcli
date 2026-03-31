@@ -69,42 +69,54 @@ export class ApiClient implements BunjangTransport {
   }
 
   async getItem(id: string): Promise<ListingDetail> {
-    const [html, descriptionPayload] = await Promise.all([
-      this.fetchText(`https://mercari.bunjang.co.kr/products/${encodeURIComponent(id)}`),
-      this.fetchJson(`https://api.bunjang.co.kr/api/pms/v1/mercari/products/${encodeURIComponent(id)}/description`).catch(
-        () => ({} as Record<string, unknown>),
-      ),
-    ]);
-    const nestedDescription =
-      typeof descriptionPayload.data === 'object' &&
-      descriptionPayload.data !== null &&
-      'descriptionJp' in descriptionPayload.data &&
-      typeof descriptionPayload.data.descriptionJp === 'string'
-        ? descriptionPayload.data.descriptionJp
-        : null;
-    const description =
-      typeof descriptionPayload.description === 'string' ? descriptionPayload.description : nestedDescription;
-    const title =
-      this.readMeta(html, 'og:title') ??
-      this.readJsonLdField(html, 'name') ??
-      `Listing ${id}`;
-    const imageUrl = this.readMeta(html, 'og:image');
-    const descriptionText = description ?? this.readMeta(html, 'og:description');
-    const price = this.readJsonLdNumber(html, 'price');
+    const payload = await this.fetchJson(`https://api.bunjang.co.kr/api/pms/v3/products-detail/${encodeURIComponent(id)}`, {
+      viewerUid: -1,
+    });
+    const data = typeof payload.data === 'object' && payload.data !== null ? payload.data : {};
+    const product = this.asRecord(data.product);
+    const shop = this.asRecord(data.shop);
+    const metrics = this.asRecord(product.metrics);
+    const geo = this.asRecord(product.geo);
+    const categories = Array.isArray(product.categories) ? product.categories.map((entry) => this.asRecord(entry)) : [];
+    const keywords = Array.isArray(product.keywords) ? product.keywords.map((entry) => this.asRecord(entry)) : [];
+    const trades = Array.isArray(product.trades) ? product.trades.map((entry) => this.asRecord(entry)) : [];
+    const shippingTrade = trades.find((entry) => entry.title === '배송비');
+    const inPersonTrade = trades.find((entry) => entry.title === '직거래 희망 장소');
+    const shippingContent = this.asRecord(shippingTrade?.content);
+    const shippingSub = Array.isArray(shippingContent.sub) ? shippingContent.sub.map((entry) => this.asRecord(entry)) : [];
+    const inPersonContent = this.asRecord(inPersonTrade?.content);
+    const inPersonMain = this.asRecord(inPersonContent.main);
+    const categoryPath = categories
+      .map((entry) => entry.name)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+      .join(' > ');
+    const tags = keywords
+      .map((entry) => entry.keyword)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0);
+
     return {
       id: String(id),
-      title,
-      url: `https://mercari.bunjang.co.kr/products/${encodeURIComponent(id)}`,
-      price,
+      title: typeof product.name === 'string' ? product.name : `Listing ${id}`,
+      url: `https://m.bunjang.co.kr/products/${encodeURIComponent(id)}`,
+      price: typeof product.price === 'number' ? product.price : null,
       currency: 'KRW',
-      imageUrl,
-      description: descriptionText,
-      metadata: {
-        ogTitle: title,
-        ogDescription: descriptionText ?? '',
-      },
+      imageUrl: this.normalizeImageUrl(product.imageUrl),
+      description: typeof product.description === 'string' ? product.description.replace(/\n{3,}/g, '\n\n').trim() : null,
+      location:
+        (typeof inPersonMain.text === 'string' && inPersonMain.text) ||
+        (typeof geo.address === 'string' ? geo.address : null),
+      category: categoryPath || null,
+      status: this.mapCondition(typeof product.condition === 'string' ? product.condition : ''),
+      shippingFee: typeof shippingSub[0]?.text === 'string' ? shippingSub[0].text : null,
+      sellerName: typeof shop.name === 'string' ? shop.name : null,
+      sellerItemCount: typeof data.shopProductCount === 'number' ? data.shopProductCount : null,
+      sellerFollowerCount: typeof shop.followerCount === 'number' ? shop.followerCount : null,
+      sellerReviewCount: typeof shop.reviewCount === 'number' ? shop.reviewCount : null,
+      sellerSalesCount: typeof shop.salesCount === 'number' ? shop.salesCount : null,
+      favoriteCount: typeof metrics.favoriteCount === 'number' ? metrics.favoriteCount : null,
+      tags,
+      metadata: {},
       transportUsed: 'api',
-      raw: { descriptionPayload, htmlExcerpt: html.slice(0, 2000) },
     };
   }
 
@@ -146,57 +158,23 @@ export class ApiClient implements BunjangTransport {
     return response.text();
   }
 
-  private readMeta(html: string, property: string): string | null {
-    const patterns = [
-      new RegExp(`<meta[^>]+property=["']${property}["'][^>]+content=["']([^"']+)["']`, 'i'),
-      new RegExp(`<meta[^>]+name=["']${property}["'][^>]+content=["']([^"']+)["']`, 'i'),
-    ];
-    for (const pattern of patterns) {
-      const match = html.match(pattern);
-      if (match?.[1]) return match[1];
-    }
-    return null;
+  private asRecord(value: unknown): Record<string, unknown> {
+    return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
   }
 
-  private readJsonLdField(html: string, field: string): string | null {
-    const match = html.match(/<script type="application\/ld\+json">(.*?)<\/script>/s);
-    if (!match?.[1]) return null;
-    try {
-      const payload = JSON.parse(match[1]) as Record<string, unknown>;
-      const value = payload[field];
-      return typeof value === 'string' ? value : null;
-    } catch {
-      return null;
-    }
+  private normalizeImageUrl(value: unknown): string | null {
+    if (typeof value !== 'string' || value.length === 0) return null;
+    return value.replace('{cnt}', '1').replace('{res}', '840');
   }
 
-  private readJsonLdNumber(html: string, field: string): number | null {
-    const match = html.match(/<script type="application\/ld\+json">(.*?)<\/script>/s);
-    if (!match?.[1]) return null;
-    try {
-      const payload = JSON.parse(match[1]) as Record<string, unknown>;
-      const directValue = payload[field];
-      if (typeof directValue === 'number') return directValue;
-      if (typeof directValue === 'string') {
-        const digits = directValue.replace(/[^0-9]/g, '');
-        if (digits) return Number(digits);
-      }
-      const offers = payload.offers;
-      if (Array.isArray(offers)) {
-        const firstOffer = offers.find(
-          (entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null,
-        );
-        const offerPrice = firstOffer?.price;
-        if (typeof offerPrice === 'number') return offerPrice;
-        if (typeof offerPrice === 'string') {
-          const digits = offerPrice.replace(/[^0-9]/g, '');
-          return digits ? Number(digits) : null;
-        }
-      }
-      return null;
-    } catch {
-      return null;
-    }
+  private mapCondition(condition: string): string | null {
+    const lookup: Record<string, string> = {
+      NEW: '새상품',
+      LIKE_NEW: '사용감 없음',
+      LIGHTLY_USED: '사용감 적음',
+      USED: '사용감 있음',
+    };
+    return lookup[condition] ?? (condition || null);
   }
 
   private unsupported(capability: Capability): Error {

@@ -1,5 +1,5 @@
 export function listingUrl(id: string): string {
-  return `https://mercari.bunjang.co.kr/products/${encodeURIComponent(id)}`;
+  return `https://m.bunjang.co.kr/products/${encodeURIComponent(id)}`;
 }
 
 export function listingActionUrl(id: string): string {

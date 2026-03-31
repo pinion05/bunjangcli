@@ -34,8 +34,13 @@ export const ListingDetailSchema = ListingSummarySchema.extend({
   description: z.string().nullable().optional(),
   status: z.string().nullable().optional(),
   category: z.string().nullable().optional(),
+  shippingFee: z.string().nullable().optional(),
   shippingAvailable: z.boolean().optional(),
   sellerId: z.string().nullable().optional(),
+  sellerItemCount: z.number().int().nonnegative().nullable().optional(),
+  sellerFollowerCount: z.number().int().nonnegative().nullable().optional(),
+  sellerReviewCount: z.number().int().nonnegative().nullable().optional(),
+  sellerSalesCount: z.number().int().nonnegative().nullable().optional(),
   tags: z.array(z.string()).optional(),
   metadata: z.record(z.string(), z.string()).default({}),
 });

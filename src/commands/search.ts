@@ -1,8 +1,7 @@
 import type { Command } from 'commander';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
 import { printListings } from '../output/formatters.js';
 import { printJson } from '../output/json.js';
+import { resolveAiOutputDir, writeSearchExport } from '../output/search-export-writer.js';
 import { createAppContext } from '../runtime/create-app-context.js';
 
 export function registerSearch(program: Command): void {
@@ -17,6 +16,7 @@ export function registerSearch(program: Command): void {
     .option('--sort <order>', 'score | date | price_asc | price_desc', 'score')
     .option('--with-detail', 'fetch full item content for every collected listing')
     .option('--output <path>', 'write collected results to a file')
+    .option('--ai', 'write AI-oriented TOON chunks instead of a single JSON export')
     .option('--concurrency <count>', 'detail fetch concurrency when --with-detail is enabled', Number, 5)
     .action(async function (query: string, options) {
       const ctx = createAppContext(this.parent?.opts());
@@ -29,27 +29,45 @@ export function registerSearch(program: Command): void {
         sort: options.sort,
       } as const;
 
-      if (options.withDetail || options.output) {
+      assertAiRequirements(options);
+
+      if (options.ai || options.withDetail || options.output) {
         const result = await ctx.searchExportService.collect(query, filters, {
           withDetail: Boolean(options.withDetail),
           concurrency: options.concurrency,
         });
+
         if (options.output) {
-          const outputPath = resolve(options.output);
-          mkdirSync(dirname(outputPath), { recursive: true });
-          writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8');
+          const writeResult = writeSearchExport(result, {
+            outputPath: options.output,
+            ai: Boolean(options.ai),
+          });
+          printJson({
+            query: result.query,
+            collectedAt: result.collectedAt,
+            count: writeResult.count,
+            output: writeResult.output,
+            withDetail: Boolean(options.withDetail),
+            ai: writeResult.mode === 'ai',
+            fileCount: writeResult.files.length,
+            files: writeResult.files,
+          });
+          return;
         }
-        if (this.parent?.opts().json || options.output) {
+
+        if (this.parent?.opts().json) {
           printJson({
             query: result.query,
             collectedAt: result.collectedAt,
             count: result.items.length,
-            output: options.output ? resolve(options.output) : null,
+            output: null,
             withDetail: Boolean(options.withDetail),
+            ai: false,
           });
-        } else {
-          printListings(result.items.map((item) => item.detail ?? item.summary));
+          return;
         }
+
+        printListings(result.items.map((item) => item.detail ?? item.summary));
         return;
       }
 
@@ -60,4 +78,13 @@ export function registerSearch(program: Command): void {
         printListings(result.items);
       }
     });
+}
+
+export function assertAiRequirements(options: { ai?: boolean; output?: string | null | undefined }): void {
+  if (options.ai && !options.output) {
+    throw new Error('AI export requires --output to point to an explicit destination directory.');
+  }
+  if (options.ai && options.output) {
+    resolveAiOutputDir(options.output);
+  }
 }

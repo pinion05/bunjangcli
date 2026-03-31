@@ -15,7 +15,7 @@
 - 정렬 (`score`, `date`, `price_asc`, `price_desc`)
 - 다페이지 수집 (`--start-page`, `--pages`, `--max-items`)
 - 상품 상세 / 본문 조회
-- 결과를 JSON 파일로 저장
+- 결과를 JSON 파일 또는 AI용 TOON chunk로 저장
 - 찜 추가 / 제거
 - 채팅 목록 조회
 - 상품 페이지에서 판매자와 새 채팅 시작
@@ -153,6 +153,10 @@ npx bunjang-cli --json item list --ids 396049093,395641230,394447826
 - 가격
 - 본문 / 설명
 - 이미지
+- 직거래지역
+- 카테고리 경로
+- 상품 태그
+- 판매자명 / 판매 상품 수 / 후기 수 / 팔로워 수(가능한 경우)
 - 메타데이터
 - transport 정보
 
@@ -184,6 +188,35 @@ npx bunjang-cli search "갤럭시 s25 울트라" \
 - `summary` : 검색 결과 정보
 - `detail` : 본문 포함 상세 정보
 - `error` : 상세 추출 실패 시 에러 메시지
+
+### AI 분석용 TOON chunk 저장
+`--ai`는 JSON 단일 파일 대신 `items-1.toon` ... `items-n.toon` 형태의 chunk 파일을 생성합니다.
+
+- `--ai`에서는 `--output`이 **파일 경로가 아니라 디렉토리 경로**여야 합니다.
+- manifest 파일은 생성하지 않습니다.
+- 기본 chunk 목표는 50,000 tokens 입니다.
+- 단일 item이 50,000 tokens를 넘으면 그 item 하나가 단독 `.toon` 파일이 됩니다.
+- TOON 직렬화는 **`@toon-format/toon` 라이브러리**를 사용하고, 토큰 수 계산은 **`gpt-tokenizer`의 `gpt-5` tokenizer** 기준입니다.
+- AI용 TOON row는 **고정 컬럼 구조**를 사용하며, 값이 없으면 `""`로 채웁니다.
+- AI용 TOON에는 `htmlExcerpt` 같은 중복/잡음 필드를 넣지 않습니다.
+- AI용 TOON에는 본문뿐 아니라 **직거래지역 / 카테고리 / 태그 / 판매자 신뢰성 필드**가 포함됩니다.
+- 검색 결과는 **listing id 기준으로 dedupe** 되어 chunk 파일 전체에서 중복 id가 없도록 유지합니다.
+
+```bash
+npx bunjang-cli search "갤럭시 s25 울트라" \
+  --start-page 1 \
+  --pages 30 \
+  --max-items 300 \
+  --with-detail \
+  --ai \
+  --output artifacts/galaxy-s25-ultra-ai
+```
+
+AI TOON 컬럼 예시:
+
+```text
+sourcePage,id,title,url,price,currency,imageUrl,description,status,shippingFee,directTradeArea,categoryPath,tags,sellerName,sellerItemCount,sellerFollowerCount,sellerReviewCount,sellerSalesCount,favoriteCount,searchTransport,detailTransport,error
+```
 
 ---
 

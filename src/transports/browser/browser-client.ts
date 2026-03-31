@@ -57,6 +57,10 @@ const SEARCH_CARD_EVAL = () => {
 
 const DETAIL_EVAL = () => {
   const text = document.body.innerText;
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
   const meta = Object.fromEntries(
     Array.from(document.querySelectorAll('meta[property], meta[name]')).flatMap((node) => {
       const key = node.getAttribute('property') || node.getAttribute('name');
@@ -64,24 +68,59 @@ const DETAIL_EVAL = () => {
       return key && value ? [[key, value]] : [];
     }),
   );
+  const priceLineIndex = lines.findIndex((line) => /^[0-9][0-9,]*원$/.test(line));
   const title =
-    meta['og:title'] ||
+    (priceLineIndex > 0 ? lines[priceLineIndex - 1] : null) ||
     document.querySelector('h1')?.textContent?.trim() ||
     document.title ||
     'Unknown item';
-  const description =
-    meta['og:description'] ||
-    document.querySelector('meta[name="description"]')?.getAttribute('content') ||
+  const imageUrl =
+    (document.querySelector('img[src*="product/"]') as HTMLImageElement | null)?.src ||
+    (document.querySelector('meta[property="og:image"]') as HTMLMetaElement | null)?.content ||
     null;
-  const summaryWrapper = document.querySelector('[class*="Summary_wrapper"]');
-  const priceCandidatesFromSummary = Array.from(
-    summaryWrapper?.querySelectorAll('p, span') ?? [],
-  )
-    .map((node) => node.textContent?.trim() ?? '')
-    .filter((value) => value.includes('원'));
-  const priceCandidates = text.match(/[0-9][0-9,]{2,}\s*원/g) ?? [];
-  const imageUrl = (document.querySelector('meta[property="og:image"]') as HTMLMetaElement | null)?.content ?? null;
-  return { title, description, priceCandidates, priceCandidatesFromSummary, imageUrl, meta, text };
+
+  const section = (label: string, nextLabels: string[]) => {
+    const start = lines.indexOf(label);
+    if (start === -1) return [];
+    let end = lines.length;
+    for (let index = start + 1; index < lines.length; index += 1) {
+      if (nextLabels.includes(lines[index])) {
+        end = index;
+        break;
+      }
+    }
+    return lines.slice(start + 1, end).filter(Boolean);
+  };
+
+  const descriptionLines = section('상품정보', ['직거래지역', '카테고리', '상품태그', '비슷한 새 상품 보기', '상점정보']);
+  const locationLines = section('직거래지역', ['카테고리', '상품태그', '비슷한 새 상품 보기', '상점정보']);
+  const categoryLines = section('카테고리', ['상품태그', '비슷한 새 상품 보기', '상점정보']).filter((line) => line !== '>');
+  const tags = section('상품태그', ['비슷한 새 상품 보기', '상점정보']).filter((line) => line.startsWith('#'));
+  const sellerLines = section('상점정보', ['상품 더보기', '상점후기', '번개톡', '바로구매', '파워링크', '회사소개']);
+  const statusLines = section('상품상태', ['배송비', '직거래지역', '상품정보', '카테고리']);
+  const shippingFeeLines = section('배송비', ['직거래지역', '상품정보', '카테고리']);
+  const favoriteCountLines = section('찜', ['번개톡', '바로구매', '안전결제 수수료 없이 구매하세요']);
+
+  const sellerItemCountText = sellerLines.find((line) => /^상품\d+/.test(line)) ?? '';
+  const sellerReviewCountMatch = text.match(/상점후기(\d+)/);
+
+  return {
+    title,
+    description: descriptionLines.join('\n'),
+    priceText: priceLineIndex >= 0 ? lines[priceLineIndex] : '',
+    imageUrl,
+    location: locationLines[0] ?? '',
+    category: categoryLines.join(' > '),
+    tags,
+    sellerName: sellerLines[0] ?? '',
+    sellerItemCountText,
+    sellerReviewCountText: sellerReviewCountMatch?.[1] ?? '',
+    status: statusLines[0] ?? '',
+    shippingFee: shippingFeeLines[0] ?? '',
+    favoriteCountText: favoriteCountLines[0] ?? '',
+    meta,
+    text,
+  };
 };
 
 export class BrowserClient implements BunjangTransport {
@@ -197,23 +236,27 @@ export class BrowserClient implements BunjangTransport {
       await page.goto(listingUrl(id), { waitUntil: 'domcontentloaded' });
       await this.softSettle(page);
       const data = await page.evaluate(DETAIL_EVAL);
-      const preferredPriceCandidate =
-        data.priceCandidatesFromSummary.find((value) => value.includes('%') && value.includes('원')) ??
-        data.priceCandidatesFromSummary[data.priceCandidatesFromSummary.length - 1] ??
-        data.priceCandidates[0];
       return {
         id,
         title: data.title,
         url: page.url(),
-        price: parsePrice(preferredPriceCandidate),
+        price: parsePrice(data.priceText),
         currency: 'KRW',
         imageUrl: data.imageUrl,
         description: data.description,
+        location: data.location || null,
+        category: data.category || null,
+        status: data.status || null,
+        shippingFee: data.shippingFee || null,
+        sellerName: data.sellerName || null,
+        sellerItemCount: this.parseFavoriteCount(data.sellerItemCountText),
+        sellerReviewCount: this.parseFavoriteCount(data.sellerReviewCountText),
+        tags: data.tags,
+        favoriteCount: this.parseFavoriteCount(data.favoriteCountText),
         transportUsed: 'browser',
         metadata: Object.fromEntries(
           Object.entries(data.meta).map(([key, value]) => [key, String(value)]),
         ),
-        raw: { text: data.text.slice(0, 5000) },
       };
     });
   }
